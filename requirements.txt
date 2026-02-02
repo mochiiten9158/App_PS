@@ -1,0 +1,8 @@
+dash
+plotly
+numpy
+pandas
+scikit-learn
+umap-learn
+matplotlib
+sympy
