@@ -16,8 +16,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use("Agg")  # non-interactive backend
 import matplotlib.pyplot as plt
+
+# from plot_embedding import parse_stats_file
 
 STATS_DIR = "./summary_stats_positive_seventy"
 TOP_K_FEATURES = 800
@@ -64,7 +66,12 @@ def build_image_index(img_dir):
 
     return index
 
-IMAGE_INDEX = build_image_index("assets/original_positive_seventy")
+def closest_image(target_corr, image_index):
+    corr, sign, stem = min(
+        image_index,
+        key=lambda x: abs(x[0] - target_corr)
+    )
+    return corr, sign, stem
 
 def target_corr_from_stats(fname):
     """
@@ -73,12 +80,21 @@ def target_corr_from_stats(fname):
     parts = fname.replace(".txt", "").split("_")
     return float(parts[-2])
 
-def closest_image(target_corr, image_index):
-    corr, sign, stem = min(
-        image_index,
-        key=lambda x: abs(x[0] - target_corr)
-    )
-    return corr, sign, stem
+def corr_from_filename(fname):
+    """
+    Extract correlation from:
+    statistics_scatter_bw_8_-0.50_n.txt  →  -0.50
+    """
+    base = os.path.basename(fname)
+    stem = base.replace("statistics_", "").replace(".txt", "")
+    parts = stem.split("_")
+
+    try:
+        corr = float(parts[-2])
+    except (IndexError, ValueError):
+        raise ValueError(f"Could not parse correlation from filename: {fname}")
+
+    return corr
 
 def parse_stats_file(path):
     with open(path, "r") as f:
@@ -169,13 +185,17 @@ def build_dataset_matrix(
 
         path = os.path.join(stats_dir, fname)
 
+        # Parse full summary stats (single vector per image)
         stats = parse_stats_file(path)
         vec = vectorize_stats(stats, template, enabled_groups)
         X.append(vec)
 
         # Recover image base name
-        # statistics_scatter_bw_70_-0.35_z.txt -> scatter_bw_70_-0.35_z
+        # statistics_scatter_bw_70_-0.35_z.txt → scatter_bw_70_-0.35_z
         image_name = (fname.replace("statistics_", "").replace(".txt", ""))
+        corr = corr_from_filename(image_name)
+
+        IMAGE_INDEX = build_image_index("assets/original_positive_seventy")
 
         target_corr = target_corr_from_stats(fname)
 
@@ -191,12 +211,16 @@ def build_dataset_matrix(
             "out_img": f"/assets/output_positive_seventy/{image_name}_output.png",
         })
 
-
     X = np.stack(X, axis=0)   # (N, F)
 
     return X, meta
 
+# -----------------------------
 # Load full dataset once
+# -----------------------------
+# -----------------------------
+# Build feature template from ONE example file
+# -----------------------------
 example_fname = next(
     f for f in sorted(os.listdir(STATS_DIR)) if f.endswith(".txt")
 )
@@ -245,27 +269,32 @@ df_features = pd.DataFrame({
     "importance": feature_importance,
 })
 
+# Map features → statistic groups
 df_features["group"] = df_features["feature"].map(FEATURE_TO_GROUP)
 
 # Safety fallback
 df_features["group"] = df_features["group"].fillna("unknown")
 
+# Assign colors per group (matplotlib-safe hex)
 df_features["color"] = df_features["group"].map(STAT_COLORS).fillna("#333333")
 
+# Sort by importance (elbow plot order)
 df_features = (
     df_features
     .sort_values("importance", ascending=False)
     .reset_index(drop=True)
 )
 
+# Global rank (0 … 942)
 df_features["rank"] = np.arange(len(df_features))
 
+# ---- Aggregate importance per statistic group ----
 df_group = (
     df_features
     .groupby("group")
     .agg(
-        group_importance=("importance", "sum"),
-        mean_rank=("rank", "mean"),            
+        group_importance=("importance", "sum"),   # total contribution
+        mean_rank=("rank", "mean"),                # x-position on elbow
         median_rank=("rank", "median"),
         n_features=("feature", "size"),
     )
@@ -277,12 +306,16 @@ df_group = df_group.sort_values(
     "group_importance", ascending=False
 ).reset_index(drop=True)
 
+
 # Compute within-group index and group sizes
 df_features["group_index"] = (
     df_features
     .groupby("group")
     .cumcount()
 )
+
+# group_sizes = df_features.groupby("group").size().to_dict()
+# df_features["group_size"] = df_features["group"].map(group_sizes)
 
 df_features["group_size"] = (
     df_features
@@ -292,6 +325,7 @@ df_features["group_size"] = (
 
 df_features["group_running_mean"] = np.nan
 
+# Running mean importance per statistic group
 for group in STAT_GROUPS.keys():
     mask = df_features["group"] == group
     vals = df_features.loc[mask, "rank"].values
@@ -299,6 +333,9 @@ for group in STAT_GROUPS.keys():
         df_features.loc[mask, "group_running_mean"] = (
             np.cumsum(vals) / (np.arange(len(vals)) + 1)
         )
+
+# Sanity check: number of features per group
+print(df_features.groupby("group").size())
 
 # Plot elbow
 elbow_fig = px.scatter(
@@ -343,23 +380,38 @@ TOP_FEATURE_INDICES = [
 
 X_top = X[:, TOP_FEATURE_INDICES]   # (N, K)
 
-X_top_scaled = StandardScaler().fit_transform(X_top)  # shape: (N, F_top)
+# Scale
+# X_top_scaled = StandardScaler().fit_transform(X_top)
 
 # Use all features directly, skip PCA
-X_final = X_top_scaled
+# X_final = X_top_scaled
 
-print("Using features:", X_final.shape[-1])
-print("Original features:", X.shape[-1])
+X_final = StandardScaler().fit_transform(X)
+
+print("Using features:", X_final.shape[-1])  # should be 1200
+print("Original features:", X.shape[-1])     # 1200
+
+# print("Using features:", X_pca_top.shape[-1])  # should be 100
+# print("Original features:", X.shape[-1])   # 943
 
 # DASH
 app = dash.Dash(__name__)
-app.config.suppress_callback_exceptions = True
 
 app.layout = html.Div([
     dcc.Graph(id="elbow-plot", figure=elbow_fig),
     # LEFT: controls
     html.Div([
         html.H3("PS Statistic Explorer"),
+        html.Label("Top K features:"),
+        dcc.Input(
+            id="topk-input",
+            type="number",
+            value=TOP_K_FEATURES,  # default 800
+            min=1,
+            max=len(FEATURE_NAMES),
+            step=1,
+        ),
+        html.Br(),
         html.Label("Select images"),
         dcc.Dropdown(
             ALL_IMAGES,
@@ -395,19 +447,27 @@ app.layout = html.Div([
     Output("umap-plot", "figure"),
     Input("image-select", "value"),
     Input("stat-select", "value"),
+    Input("topk-input", "value"),
     State("recompute", "n_clicks"),
 )
 
-def update_embedding(selected_images, enabled_stats, _):
+def update_embedding(selected_images, enabled_stats, topk_value, _):
 
     mask = [m["image"] in selected_images for m in META]
     meta = [m for m, keep in zip(META, mask) if keep]
 
-    X = X_final[mask]  # Already scaled
+    topk_value = min(max(1, topk_value), X_final.shape[1])
 
+    top_features = df_features.head(topk_value)
+    top_indices = [FEATURE_NAMES.index(f) for f in top_features["feature"]]
+
+    # X = StandardScaler().fit_transform(X_pca_top[mask])
+    X = X_final[mask][:, top_indices]  # Already scaled
+
+    print(f"Computing UMAP for {X.shape[0]} images using top {topk_value} features...")
     print(f"Computing UMAP for {X.shape[0]} images with {len(enabled_stats)} statistic groups...")
 
-    Xu = umap.UMAP(n_neighbors=5, min_dist=0.3, random_state=0, n_epochs=500, init="spectral", low_memory=True).fit_transform(X)
+    Xu = umap.UMAP(n_neighbors=5, min_dist=0.3, random_state=0, n_epochs=500, init="spectral", n_jobs = 1).fit_transform(X)
     df = pd.DataFrame({
         "x": Xu[:, 0],
         "y": Xu[:, 1],
@@ -417,6 +477,7 @@ def update_embedding(selected_images, enabled_stats, _):
         "out": [m["out_img"] for m in meta],
     })
 
+    # Ensure corr is numeric and finite
     df["corr"] = pd.to_numeric(df["corr"], errors="coerce").fillna(0.0)
 
     abs_corr = np.abs(df["corr"].values)
@@ -434,12 +495,22 @@ def update_embedding(selected_images, enabled_stats, _):
 
     fig.update_traces(
             customdata=df[["image", "orig", "out", "corr"]].values,
-            hovertemplate="<b>%{customdata[0]}</b><br>corr=%{customdata[3]:.3f}<extra></extra>",
+            hovertemplate="<b>%{customdata[0]}</b><br>corr=%{customdata[3]:.2f}<extra></extra>",
             marker=dict(
                 color="black",
                 opacity=0.6
             )
         )
+
+    # for _, row in df.iterrows():
+    #     fig.add_annotation(
+    #         x=row["x"],
+    #         y=row["y"],
+    #         text=f"{row['corr']:.2f}",
+    #         showarrow=False,
+    #         font=dict(size=10, color="black"),
+    #         yshift=-15
+    #     )
 
     return fig
 
